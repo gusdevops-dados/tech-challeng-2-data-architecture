@@ -58,3 +58,4 @@ data/raw/
 data/processed/
 *.parquet
 *.csv.gz
+REUNIAO1.TXT
