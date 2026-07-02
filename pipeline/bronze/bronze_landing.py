@@ -1,38 +1,49 @@
-"""
-Bronze Layer - Landing Zone
-Consolida dados brutos (batch + streaming) no S3 sem transformações significativas.
-Garante histórico completo com particionamento por data de ingestão.
-"""
-import sys
-from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from pyspark.sql import functions as F
+from tkinter.constants import Y
+import boto3
+import pandas as pd
+import pyarrow 
+import os
+from datetime import datetime, timezone
+import io
 
-args = getResolvedOptions(sys.argv, ["JOB_NAME", "S3_BUCKET", "TABLE_NAME", "INGESTION_DATE"])
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_PATH = os.path.join(BASE_DIR, "../../data/raw/inep")
 
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args["JOB_NAME"], args)
+BUCKET = "tc-fase2-alfabetizacao-bronze"
+CLIENT = boto3.client("s3", region_name="us-east-1")
 
-S3_BUCKET = args["S3_BUCKET"]
-TABLE_NAME = args["TABLE_NAME"]
-INGESTION_DATE = args["INGESTION_DATE"]
+TODAY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-input_path = f"s3://{S3_BUCKET}/raw/{TABLE_NAME}/"
-output_path = f"s3://{S3_BUCKET}/bronze/{TABLE_NAME}/ingestion_date={INGESTION_DATE}/"
+def listar_arquivos(pasta: str) -> list[str]:
+    return [
+        os.path.join(pasta, f)
+        for f in os.listdir(pasta)
+        if os.path.isfile(os.path.join(pasta, f))
+    ]
 
-df = spark.read.option("mergeSchema", "true").parquet(input_path)
+def processar_arquivo(arquivo: str):
+    df = pd.read_csv(arquivo)
+    df["_ingestion_date"] = TODAY
+    df["_source_file"] = os.path.basename(arquivo) 
+    return df
 
-df = (
-    df.withColumn("_bronze_timestamp", F.current_timestamp())
-      .withColumn("_ingestion_date", F.lit(INGESTION_DATE))
-)
 
-df.write.mode("overwrite").parquet(output_path)
+def upload_para_s3_exemplo(df, nome_tabela):
+    buffer = io.BytesIO()
+    
+    df.to_parquet(buffer, index=False)
+    
+    buffer.seek(0)
 
-print(f"Bronze landing concluido: {df.count()} registros -> {output_path}")
-job.commit()
+    s3_key = f"{nome_tabela}/ingestion_date={TODAY}/data.parquet"
+    
+    CLIENT.upload_fileobj(buffer, BUCKET, s3_key)
+    print(f"Upload concluido: s3://{BUCKET}/{s3_key}")
+
+def executar():
+    for arquivo in listar_arquivos(BASE_PATH):
+        nome_tabela = os.path.splitext(os.path.basename(arquivo))[0]
+        df = processar_arquivo(arquivo)
+        upload_para_s3_exemplo(df, nome_tabela)
+
+executar()

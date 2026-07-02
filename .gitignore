@@ -27,6 +27,11 @@ ENV/
 .aws/
 credentials
 
+# GCP credentials (NUNCA commitar)
+data/credentials/
+*.json
+!data/samples/*.json
+
 # Terraform
 infrastructure/terraform/.terraform/
 infrastructure/terraform/*.tfstate
@@ -53,3 +58,4 @@ data/raw/
 data/processed/
 *.parquet
 *.csv.gz
+REUNIAO1.TXT

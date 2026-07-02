@@ -34,6 +34,8 @@ Pipeline hibrida (Batch + Streaming) na **AWS**, seguindo a **Arquitetura Medalh
 
 Ver diagrama completo em [docs/architecture/architecture_overview.md](docs/architecture/architecture_overview.md).
 
+Decisões de implementação das camadas Bronze e Silver (motivações, achados nos dados, armadilhas encontradas e por que cada tratamento foi feito ou descartado): [docs/pipeline_bronze_silver.md](docs/pipeline_bronze_silver.md).
+
 ## Fontes de Dados
 
 | Entidade                      | Origem        | Tipo de Ingestao |
