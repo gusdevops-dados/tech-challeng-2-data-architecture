@@ -28,7 +28,7 @@ def processar_arquivo(arquivo: str):
     return df
 
 
-def upload_para_s3_exemplo(df, nome_tabela):
+def upload_para_s3(df, nome_tabela):
     buffer = io.BytesIO()
     
     df.to_parquet(buffer, index=False)
@@ -44,6 +44,6 @@ def executar():
     for arquivo in listar_arquivos(BASE_PATH):
         nome_tabela = os.path.splitext(os.path.basename(arquivo))[0]
         df = processar_arquivo(arquivo)
-        upload_para_s3_exemplo(df, nome_tabela)
+        upload_para_s3(df, nome_tabela)
 
 executar()
