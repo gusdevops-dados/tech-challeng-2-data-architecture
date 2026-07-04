@@ -50,7 +50,6 @@ for tabela in tabelas:
     print(f"{tabela}: {ultimas_particoes[tabela]}")
 
     data_frames[tabela] = ler_tabelas(tabela=tabela, particao=ultimas_particoes[tabela])
-    print(data_frames[tabela])
 
 
 def decodificar_rede(dataframe):
@@ -122,7 +121,6 @@ regras = [
     (lambda df: "alfabetizado" in df.columns, padronizar_alfabetizado),
     (lambda df: any(c.startswith("meta_alfabetizacao_") for c in df.columns), unpivot_metas),
 ]
-
 
 
 def tratar_tabelas():
