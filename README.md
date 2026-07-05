@@ -1,134 +1,179 @@
-# Pipeline Hibrido para Analise da Alfabetizacao no Brasil
-**Tech Challenge - Fase 2 | Pos Tech FIAP**
+# Pipeline Híbrido para Análise da Alfabetização no Brasil
+**Tech Challenge - Fase 2 | Pós Tech FIAP**
 
 ## Contexto do Problema
 
-A alfabetizacao infantil e um pilar fundamental para o desenvolvimento do Brasil. O **Compromisso Nacional Crianca Alfabetizada** estabelece a meta de que 100% das criancas estejam alfabetizadas ao final do 2o ano do ensino fundamental ate 2030. O **Indicador Crianca Alfabetizada** (ponto de corte: 743 pontos no SAEB) mede o percentual de estudantes que atingem esse nivel de proficiencia.
+A alfabetização infantil é um dos pilares fundamentais para o desenvolvimento educacional, social e econômico do Brasil. O **Compromisso Nacional Criança Alfabetizada** mobiliza União, estados, Distrito Federal e municípios com o objetivo de garantir que todas as crianças brasileiras estejam alfabetizadas até o final do 2º ano do ensino fundamental.
 
-Para subsidiar politicas publicas baseadas em evidencias, e necessario integrar multiplas fontes de dados educacionais em uma pipeline escalavel e confiavel.
+Em 2023, o INEP realizou a Pesquisa Alfabetiza Brasil e definiu o ponto de corte de **743 pontos na escala de proficiência do Saeb** como o nível a partir do qual uma criança pode ser considerada alfabetizada. A partir desse parâmetro nasceu o **Indicador Criança Alfabetizada**: o percentual de estudantes que atingem esse patamar. A meta nacional é que, até 2030, todas as crianças estejam alfabetizadas ao final do 2º ano.
 
-## Arquitetura da Solucao
+Entender os fatores que influenciam a alfabetização exige integrar fontes heterogêneas — metas nacionais/estaduais/municipais, microdados de alunos e indicadores de desempenho — em uma pipeline confiável. Esse é o problema que este projeto resolve: uma equipe de engenharia de dados constrói essa pipeline para uma organização pública de análise educacional.
 
-Pipeline hibrida (Batch + Streaming) na **AWS**, seguindo a **Arquitetura Medalhao**:
+## Status do Projeto
+
+Este README descreve o estado **real e testado** do pipeline, não uma arquitetura alvo. Seções marcadas como planejadas ainda não foram implementadas.
+
+| Camada / Componente | Status |
+|---|---|
+| Bronze (ingestão batch) | ✅ Implementado e testado |
+| Silver (limpeza, padronização, join) | ✅ Implementado e testado |
+| Qualidade de dados (duplicidade, nulos, chaves, consistência) | ✅ Implementado e testado |
+| Gold (camada analítica) | ✅ Implementado e testado |
+| Ingestão streaming (simulação) | 🔲 Código escrito, ainda não implantado/testado |
+| Monitoramento (CloudWatch) | 🔲 Planejado (opcional no enunciado) |
+| Infraestrutura como código (Terraform) | 🔲 Esboço criado, ainda não aplicado (buckets foram criados via script Python) |
+
+## Arquitetura da Solução (implementação atual)
+
+A pipeline segue a **Arquitetura Medalhão** (Bronze/Silver/Gold), rodando em **AWS (S3)**, com processamento em **Python/pandas** — não há cluster Spark/Glue em execução hoje. Essa escolha é deliberada, não uma limitação: ver [Decisões Arquiteturais](#decisões-arquiteturais-trade-offs).
 
 ```
-[Base dos Dados]  +  [Eventos Simulados]
-       |                      |
-  AWS Glue (Batch)     Kinesis (Streaming)
-       |                      |
-       └──────────┬───────────┘
-                  v
-           BRONZE LAYER (S3/Parquet)
-                  |
-           AWS Glue (Silver Job)
-                  v
-           SILVER LAYER (S3/Parquet)
-                  |
-           AWS Glue (Gold Job)
-                  v
-           GOLD LAYER (S3/Parquet)
-                  |
-       ┌──────────┴──────────┐
-    Athena/QuickSight    SageMaker ML
+[Base dos Dados (BigQuery)]
+            |
+            v
+   CSV local (data/raw/inep/)
+            |
+            | pipeline/bronze/bronze_landing.py
+            | (pandas + boto3, adiciona _ingestion_date / _source_file)
+            v
+   BRONZE LAYER  s3://tc-fase2-alfabetizacao-bronze/<tabela>/ingestion_date=YYYY-MM-DD/data.parquet
+            |
+            | pipeline/silver/silver_transform.py
+            | (pandas + s3fs: decodifica rede, normaliza chaves,
+            |  trata nulos, unpivot de metas, valida consistência, faz join)
+            v
+   SILVER LAYER  s3://tc-fase2-alfabetizacao-silver/<tabela>/ingestion_date=YYYY-MM-DD/data.parquet
+            |    (resultado_municipio_x_meta, resultado_uf_x_meta, alunos, meta_brasil)
+            |
+            | quality/validations/data_quality_checks.py
+            | (roda contra o Silver: duplicidade, nulos, chaves, consistência)
+            |
+            | pipeline/gold/gold_analytics.py
+            | (pandas: gap meta x resultado, evolução temporal por pivot, indicador por município)
+            v
+   GOLD LAYER  s3://tc-fase2-alfabetizacao-gold/<tabela>/ingestion_date=YYYY-MM-DD/data.parquet
+            |    (indicador_municipio, comparacao_meta_municipio, comparacao_meta_uf,
+            |     evolucao_temporal_municipio, evolucao_temporal_uf)
+
+[Streaming — planejado/simulado, não implantado]
+   pipeline/ingestion/streaming/kinesis_producer.py  → Kinesis stream → kinesis_consumer.py → Bronze
 ```
 
-Ver diagrama completo em [docs/architecture/architecture_overview.md](docs/architecture/architecture_overview.md).
+Uma visão de arquitetura de **longo prazo** (com Glue, Athena, SageMaker, CloudWatch totalmente implantados) está documentada separadamente em [docs/architecture/architecture_overview.md](docs/architecture/architecture_overview.md) — é o alvo de evolução do projeto, não o estado atual.
 
-Decisões de implementação das camadas Bronze e Silver (motivações, achados nos dados, armadilhas encontradas e por que cada tratamento foi feito ou descartado): [docs/pipeline_bronze_silver.md](docs/pipeline_bronze_silver.md).
+Decisões de implementação das camadas Bronze, Silver e Gold (motivações, achados reais nos dados, armadilhas encontradas e por que cada tratamento foi feito ou descartado): [docs/pipeline_bronze_silver.md](docs/pipeline_bronze_silver.md).
+
+## Fluxo de Dados
+
+1. As 6 tabelas fonte (`alunos`, `municipio`, `uf`, `meta_alfabetizacao_brasil`, `meta_alfabetizacao_uf`, `meta_alfabetizacao_municipio`) são obtidas da plataforma **Base dos Dados** via BigQuery e salvas localmente como CSV em `data/raw/inep/`.
+2. **Bronze**: `bronze_landing.py` lê os CSVs, adiciona colunas de auditoria (`_ingestion_date`, `_source_file`) e grava em Parquet no S3, particionado por `ingestion_date`.
+3. **Silver**: `silver_transform.py` lê a última partição de cada tabela Bronze, aplica um conjunto de regras de transformação orientadas por coluna (não por nome de tabela — cada regra só roda se a tabela tiver a coluna/tipo relevante), junta resultado real com meta por município e por UF, e grava 4 tabelas tratadas no S3.
+4. **Qualidade**: `data_quality_checks.py` roda checks genéricos (duplicidade, valores ausentes, integridade de chave, consistência entre tabelas) contra as tabelas Silver, com severidade `critico` (interrompe o pipeline) ou `informativo` (só reporta).
+5. **Gold**: `gold_analytics.py` lê `resultado_municipio_x_meta` e `resultado_uf_x_meta` da Silver e grava 5 tabelas prontas para consumo: `indicador_municipio` (foto do ano mais recente), `comparacao_meta_municipio`/`comparacao_meta_uf` (gap e flag `atingiu_meta`) e `evolucao_temporal_municipio`/`evolucao_temporal_uf` (taxa por ano lado a lado + variação do período).
 
 ## Fontes de Dados
 
-| Entidade                      | Origem        | Tipo de Ingestao |
-|-------------------------------|---------------|-----------------|
-| Meta Alfabetizacao Brasil     | Base dos Dados | Batch           |
-| Meta Alfabetizacao por UF     | Base dos Dados | Batch           |
-| Meta Alfabetizacao por Municipio | Base dos Dados | Batch        |
-| Municipios                    | Base dos Dados | Batch           |
-| UFs                           | Base dos Dados | Batch           |
-| Atualizacoes de indicadores   | Simulado       | Streaming       |
+| Entidade | Origem | Tipo de Ingestão |
+|---|---|---|
+| Dados de alunos (microdados) | Base dos Dados (BigQuery) | Batch |
+| Município (resultado agregado) | Base dos Dados (BigQuery) | Batch |
+| UF (resultado agregado) | Base dos Dados (BigQuery) | Batch |
+| Meta Alfabetização Brasil | Base dos Dados (BigQuery) | Batch |
+| Meta Alfabetização por UF | Base dos Dados (BigQuery) | Batch |
+| Meta Alfabetização por Município | Base dos Dados (BigQuery) | Batch |
+| Atualização de indicadores | Simulado | Streaming (planejado) |
 
-## Estrutura do Repositorio
+## Estrutura do Repositório
 
 ```
-tech-challenge-fase2/
-├── data/samples/              # Amostras para testes locais
-├── infrastructure/terraform/  # Infraestrutura como codigo (AWS)
+tech_challeng_2/
+├── data/
+│   ├── raw/inep/                     # CSVs brutos baixados via BigQuery (basedosdados)
+│   └── credentials/                  # Credencial GCP (não versionada)
+├── infrastructure/
+│   ├── Scripts/create_s3_bucket.py   # Criação dos buckets Bronze/Silver/Gold (boto3)
+│   └── terraform/                    # IaC — esboço de arquitetura alvo, ainda não aplicado
 ├── pipeline/
-│   ├── ingestion/
-│   │   ├── batch/             # Glue Jobs de ingestao batch
-│   │   └── streaming/         # Kinesis producer + Lambda consumer
-│   ├── bronze/                # Landing zone scripts
-│   ├── silver/                # Transformacao e integracao
-│   └── gold/                  # Camada analitica
-├── quality/validations/       # Checks de qualidade de dados
-├── monitoring/alerts/         # Configuracao de alarmes CloudWatch
-├── docs/architecture/         # Diagrama e descricao da arquitetura
-└── notebooks/exploration/     # Analise exploratoria inicial
+│   ├── bronze/bronze_landing.py      # Ingestão batch: CSV local -> S3 Parquet
+│   ├── silver/silver_transform.py    # Limpeza, padronização, join, gravação no S3
+│   ├── gold/gold_analytics.py        # Camada analítica: indicador, comparação meta x resultado, evolução temporal
+│   └── ingestion/streaming/          # Kinesis producer/consumer — planejado, não implantado
+├── quality/validations/data_quality_checks.py  # Checks de qualidade de dados
+├── monitoring/alerts/                # Esqueleto de alarmes CloudWatch — planejado
+├── docs/
+│   ├── architecture/architecture_overview.md   # Arquitetura alvo de longo prazo
+│   └── pipeline_bronze_silver.md               # Decisões reais de implementação
+└── notebooks/exploration/            # Análise exploratória inicial
 ```
 
 ## Tecnologias Utilizadas
 
-| Tecnologia        | Uso                                  |
-|-------------------|--------------------------------------|
-| AWS Glue (PySpark)| Processamento batch e transformacoes |
-| Amazon Kinesis    | Ingestao de eventos em streaming     |
-| Amazon S3         | Data lake (Bronze/Silver/Gold)       |
-| AWS Lambda        | Consumer do Kinesis                  |
-| Amazon Athena     | Consultas SQL sobre camada Gold      |
-| Amazon CloudWatch | Monitoramento e alertas              |
-| Amazon SNS        | Notificacoes de alertas              |
-| Terraform         | Infraestrutura como codigo           |
-| Apache Parquet    | Formato colunar para armazenamento   |
+| Tecnologia | Uso | Justificativa |
+|---|---|---|
+| Python + pandas | Transformação e limpeza dos dados | Volume atual (maior tabela ~3,8M linhas) cabe confortavelmente em memória — dispensa cluster distribuído (Glue/Spark) nesta fase |
+| boto3 | Leitura/escrita de metadados e objetos no S3 | Cliente AWS direto, sem overhead de orquestração gerenciada |
+| s3fs | Leitura/escrita de Parquet direto em `s3://` via pandas | Evita gerenciar downloads/uploads manuais de arquivos |
+| Apache Parquet | Formato de armazenamento em todas as camadas | Colunar, comprime melhor que CSV, leitura seletiva de colunas |
+| Amazon S3 | Data lake (Bronze/Silver/Gold) | Custo baixo por armazenamento, particionamento nativo por prefixo |
+| Google BigQuery (via Base dos Dados) | Fonte dos dados brutos | Extração pontual dos datasets públicos do INEP já estruturados |
+| Amazon Kinesis (planejado) | Simulação de ingestão streaming | Managed, baixa latência — código escrito, ainda não implantado |
 
-## Decisoes Arquiteturais
+## Decisões Arquiteturais (trade-offs)
 
 ### Batch vs Streaming
-- **Batch**: dados historicos de metas e resultados educacionais (atualizados anualmente)
-- **Streaming**: simulacao de eventos de atualizacao de indicadores em tempo quase real
+Hoje só o batch está implementado e testado ponta a ponta. O streaming é permitido pelo enunciado como **simulação** — os scripts (`kinesis_producer.py`/`kinesis_consumer.py`) já existem, mas adiamos o deploy real do stream Kinesis para não gerar custo de infraestrutura rodando sem necessidade antes de haver um caso de uso real de dados em tempo real neste projeto.
 
 ### Data Lake vs Data Warehouse
-- Adotado **Data Lake (S3 + Athena)** pela flexibilidade de esquema e custo vs Redshift/Snowflake
+Optamos por **Data Lake (S3 + Parquet)** em vez de um Data Warehouse gerenciado (Redshift/BigQuery). Motivo: schema evolui entre as camadas (Bronze bruto → Silver tratado), e pandas lê Parquet diretamente do S3 sem custo de warehouse ocioso — só paga o que está armazenado.
 
 ### Custo vs Performance
-- Parquet com compressao Snappy reduz custo de armazenamento em ~75%
-- Athena pay-per-query elimina custo de warehouse ocioso
-- Kinesis com 1 shard (escala horizontal sob demanda)
+Escolhemos processar com pandas em scripts diretos em vez de AWS Glue (PySpark gerenciado). Isso evita custo por DPU-hora e a complexidade operacional de um cluster distribuído — adequado ao volume atual. Se o volume crescer para dezenas de milhões de linhas ou mais, migrar essas mesmas transformações para Glue/Spark seria o próximo passo natural (a lógica já está isolada em funções puras `dataframe -> dataframe`, o que facilita essa migração futura).
 
-## FinOps
+## Qualidade de Dados
 
-- **Parquet + particionamento**: reduz dados escaneados no Athena
-- **S3 Lifecycle**: Bronze -> S3 Glacier apos 90 dias
-- **Glue Serverless**: cobra apenas por DPU-hora durante execucao
-- **Athena**: cobra apenas pelos dados escaneados
+`quality/validations/data_quality_checks.py` implementa 4 checks genéricos e reutilizáveis, aplicáveis a qualquer tabela/camada:
+- **Duplicidade** — nenhuma chave composta deveria se repetir (ex.: `id_aluno + ano`).
+- **Valores ausentes** — colunas que nunca deveriam ser nulas (diferente de nulos documentados como esperados, como `proficiencia` quando o aluno não fez a prova — ver [docs/pipeline_bronze_silver.md](docs/pipeline_bronze_silver.md)).
+- **Chave de relacionamento** — toda chave "filha" deveria existir na tabela "pai" (ex.: todo `id_municipio` em `alunos` existe em `resultado_municipio_x_meta`).
+- **Consistência entre tabelas** — o mesmo dado publicado em duas fontes diferentes deveria bater.
 
-## Monitoramento
+Cada check tem uma **severidade**: `critico` interrompe o pipeline (`ValueError`) se falhar; `informativo` só reporta (usado para casos já validados como esperados, ex.: municípios sem nenhum aluno avaliado num dado ano não aparecem na tabela agregada — não é erro).
 
-Alarmes CloudWatch configurados para:
-- Falhas nos Glue Jobs
-- Latencia do Kinesis (IteratorAge > 60s)
-- Erros na Lambda consumer
-- Falhas nas validacoes de qualidade
+## Monitoramento e FinOps
 
-## Aplicacao em IA (Camada Gold)
+**Monitoramento (implementado hoje):** os scripts imprimem logs de execução, e os checks críticos de qualidade falham explicitamente (exceção) quando uma regra é violada — isso já funciona como um alerta mínimo. Alarmes CloudWatch automatizados (`monitoring/alerts/`) estão planejados, mas não implantados (item opcional do enunciado).
 
-A camada Gold disponibiliza datasets prontos para:
-- **Modelos preditivos**: prever percentual de alfabetizacao por municipio com base em variaveis socioeconomicas
-- **Clustering**: identificar grupos de municipios com vulnerabilidade educacional similar
-- **Analise de desigualdade**: series temporais de evolucao por regiao
-- **Apoio a politicas publicas**: ranking de municipios prioritarios para intervencao
+**FinOps (implementado hoje):**
+- Parquet em todas as camadas (~75% menor que CSV equivalente).
+- Particionamento por `ingestion_date` — permite reprocessar sem sobrescrever e, futuramente, ler só a partição necessária.
+- Nenhum recurso computacional roda continuamente: os scripts processam sob demanda e terminam; o único custo recorrente hoje é armazenamento no S3 (bronze + silver), sem cluster, warehouse ou stream ficando ociosos.
+- Streaming (Kinesis) deliberadamente não implantado ainda — evita pagar por um shard rodando 24/7 sem uso real.
 
-## Como Executar Localmente (Teste)
+## Aplicação em IA (Camada Gold)
+
+Os datasets da Gold já estão prontos para:
+- **Modelos preditivos**: `indicador_municipio` como base para prever a taxa de alfabetização a partir de variáveis socioeconômicas (a integrar via enriquecimento externo — ver seção de fontes opcionais do enunciado).
+- **Análise de desigualdade educacional**: `comparacao_meta_municipio`/`comparacao_meta_uf` já trazem o `gap` (distância entre resultado e meta) pronto, sem precisar recalcular.
+- **Apoio a políticas públicas**: ordenar `comparacao_meta_municipio` pelo maior `gap` negativo dá um ranking de municípios prioritários para intervenção.
+- **Séries temporais**: `evolucao_temporal_municipio`/`evolucao_temporal_uf` trazem a variação entre os dois anos disponíveis (2023→2024) como ponto de partida para modelos de tendência quando mais anos forem incorporados.
+
+## Como Executar Localmente
+
+Este projeto usa `/opt/anaconda3/bin/python3` (ambiente com boto3/pandas/pyarrow/s3fs instalados) e requer credenciais AWS configuradas localmente (`~/.aws/credentials`, região `us-east-1`).
 
 ```bash
-# Instalar dependencias
-pip install pandas matplotlib seaborn
+# 1. Criar os buckets S3 (Bronze/Silver/Gold), se ainda não existirem
+/opt/anaconda3/bin/python3 infrastructure/Scripts/create_s3_bucket.py
 
-# Analise exploratoria
-jupyter notebook notebooks/exploration/01_exploratory_analysis.ipynb
+# 2. Rodar a ingestão Bronze (lê CSVs locais em data/raw/inep/, grava no S3)
+/opt/anaconda3/bin/python3 pipeline/bronze/bronze_landing.py
 
-# Infraestrutura (requer AWS CLI configurado)
-cd infrastructure/terraform
-terraform init
-terraform plan -var="alert_email=seu@email.com"
-terraform apply
+# 3. Rodar a transformação Silver (lê do Bronze, trata, junta, grava no S3)
+/opt/anaconda3/bin/python3 pipeline/silver/silver_transform.py
+
+# 4. Rodar os checks de qualidade de dados contra o Silver
+/opt/anaconda3/bin/python3 quality/validations/data_quality_checks.py
+
+# 5. Rodar a camada Gold (lê do Silver, gera os datasets analíticos, grava no S3)
+/opt/anaconda3/bin/python3 pipeline/gold/gold_analytics.py
 ```
