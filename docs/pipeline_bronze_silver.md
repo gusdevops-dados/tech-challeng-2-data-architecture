@@ -1,6 +1,6 @@
-# Bronze e Silver — Decisões de Implementação
+# Bronze, Silver e Gold — Decisões de Implementação
 
-Este documento explica **o que foi construído e por quê** nas camadas Bronze e Silver do pipeline (`pipeline/bronze/bronze_landing.py` e `pipeline/silver/silver_transform.py`). O objetivo não é descrever "o que o código faz" (isso está no próprio código) — é registrar o raciocínio por trás de cada decisão, os achados nos dados reais que motivaram cada tratamento, e os casos em que decidimos **não** tratar algo, e por quê.
+Este documento explica **o que foi construído e por quê** nas três camadas do pipeline (`pipeline/bronze/bronze_landing.py`, `pipeline/silver/silver_transform.py` e `pipeline/gold/gold_analytics.py`). O objetivo não é descrever "o que o código faz" (isso está no próprio código) — é registrar o raciocínio por trás de cada decisão, os achados nos dados reais que motivaram cada tratamento, e os casos em que decidimos **não** tratar algo, e por quê.
 
 ## Contexto
 
@@ -98,3 +98,33 @@ Quatro tabelas finais gravadas em Parquet em `s3://tc-fase2-alfabetizacao-silver
 - `meta_brasil`
 
 Escrita direto via `to_parquet("s3://...")` usando `s3fs` (a mesma biblioteca já usada pra leitura), sem precisar do padrão `io.BytesIO` + `upload_fileobj` usado na Bronze.
+
+## Gold — `pipeline/gold/gold_analytics.py`
+
+Lê as 2 tabelas de resultado da Silver (`resultado_municipio_x_meta`, `resultado_uf_x_meta`) e gera 5 tabelas analíticas, cobrindo os 3 pedidos do enunciado (indicador por município, comparação meta x resultado, evolução temporal). Segue o mesmo padrão de leitura por partição da Silver (`get_ultima_particao` + `ler_silver`).
+
+### `comparar_meta_resultado` → `comparacao_meta_municipio`, `comparacao_meta_uf`
+
+Função genérica (recebe `dataframe` + `chave_local`, funciona tanto pra município quanto pra UF) que calcula `gap = taxa_alfabetizacao - valor_meta` e a flag `atingiu_meta = gap >= 0`.
+
+**Decisão:** a função filtra primeiro por `valor_meta.notna()`, descartando linhas sem meta definida, em vez de manter todas as linhas com `gap` nulo. Motivo: essa tabela é especificamente uma "comparação" — uma linha sem meta não tem o que comparar, e mantê-la só adicionaria ruído num dataset pensado para consumo direto em dashboard. Isso é diferente da decisão tomada na Silver de manter nulos "informativos" — ali o objetivo era preservar o dado bruto tratado; aqui o objetivo é entregar um dataset pronto para uma pergunta específica.
+
+**Resultado:** 5.232 linhas em `comparacao_meta_municipio` e 24 em `comparacao_meta_uf` — os mesmos números que já apareciam no join da Silver (ver seção acima), confirmando que o filtro não introduziu nem perdeu nada de inesperado.
+
+### `construir_evolucao_temporal` → `evolucao_temporal_municipio`, `evolucao_temporal_uf`
+
+Usa `pivot_table` para transformar `ano` de linha em coluna (`taxa_alfabetizacao_2023`, `taxa_alfabetizacao_2024`, etc.) e calcula `variacao_periodo` (ano mais recente menos o mais antigo).
+
+**Pré-condição que torna o pivot seguro:** `pivot_table` agrega silenciosamente (média, por padrão) se o índice (`chave_local + rede_padranizado`) não for único por `ano` — isso poderia mascarar um bug sem erro nenhum. O módulo de qualidade (`quality/validations/data_quality_checks.py`) já confirma via `check_duplicidade` que `ano + id_municipio + rede_padranizado` (e o equivalente em UF) é uma chave única na Silver, então o pivot aqui não agrega nada de fato — só reorganiza.
+
+**Decisão de generalização:** o ano mais recente/mais antigo são calculados dinamicamente (`max(anos)`/`min(anos)`), não hardcoded como `2024`/`2023` — quando uma nova partição com 2025 chegar, a função não precisa mudar.
+
+### `construir_indicador_municipio` → `indicador_municipio`
+
+A mais simples das 3: filtra `resultado_municipio_x_meta` para o ano mais recente (`dataframe["ano"].max()`, também dinâmico) e seleciona `id_municipio`, `rede_padranizado`, `taxa_alfabetizacao`, `media_portugues`. Sem cálculo — é a "foto" mais atual do indicador por município.
+
+**Resultado:** 12.448 linhas — exatamente metade das 23.995 linhas de `resultado_municipio_x_meta` (que tem 2 anos), confirmando que o filtro por ano mais recente pegou só uma fatia, como esperado.
+
+### Gravação no bucket Gold
+
+5 tabelas gravadas em `s3://tc-fase2-alfabetizacao-gold/<tabela>/ingestion_date=YYYY-MM-DD/data.parquet`: `comparacao_meta_municipio`, `comparacao_meta_uf`, `evolucao_temporal_municipio`, `evolucao_temporal_uf`, `indicador_municipio`.
