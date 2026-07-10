@@ -19,7 +19,7 @@ Este README descreve o estado **real e testado** do pipeline, não uma arquitetu
 | Silver (limpeza, padronização, join) | ✅ Implementado e testado |
 | Qualidade de dados (duplicidade, nulos, chaves, consistência) | ✅ Implementado e testado |
 | Gold (camada analítica) | ✅ Implementado e testado |
-| Ingestão streaming (simulação) | 🔲 Código escrito, ainda não implantado/testado |
+| Ingestão streaming (simulação) | ✅ Implementado e testado (stream provisionado sob demanda, não fica ativo continuamente) |
 | Monitoramento (CloudWatch) | 🔲 Planejado (opcional no enunciado) |
 | Infraestrutura como código (Terraform) | 🔲 Esboço criado, ainda não aplicado (buckets foram criados via script Python) |
 
@@ -55,8 +55,10 @@ A pipeline segue a **Arquitetura Medalhão** (Bronze/Silver/Gold), rodando em **
             |    (indicador_municipio, comparacao_meta_municipio, comparacao_meta_uf,
             |     evolucao_temporal_municipio, evolucao_temporal_uf)
 
-[Streaming — planejado/simulado, não implantado]
-   pipeline/ingestion/streaming/kinesis_producer.py  → Kinesis stream → kinesis_consumer.py → Bronze
+[Streaming — simulado, testado sob demanda]
+   kinesis_producer.py → Kinesis stream (1 shard) → kinesis_consumer.py (polling via get_records)
+        → s3://tc-fase2-alfabetizacao-bronze/streaming/indicadores/year=/month=/day=/*.json
+   (o stream é criado, usado no teste e deletado logo em seguida — não fica ativo continuamente)
 ```
 
 Uma visão de arquitetura de **longo prazo** (com Glue, Athena, SageMaker, CloudWatch totalmente implantados) está documentada separadamente em [docs/architecture/architecture_overview.md](docs/architecture/architecture_overview.md) — é o alvo de evolução do projeto, não o estado atual.
@@ -81,7 +83,7 @@ Decisões de implementação das camadas Bronze, Silver e Gold (motivações, ac
 | Meta Alfabetização Brasil | Base dos Dados (BigQuery) | Batch |
 | Meta Alfabetização por UF | Base dos Dados (BigQuery) | Batch |
 | Meta Alfabetização por Município | Base dos Dados (BigQuery) | Batch |
-| Atualização de indicadores | Simulado | Streaming (planejado) |
+| Atualização de indicadores | Simulado | Streaming |
 
 ## Estrutura do Repositório
 
@@ -97,7 +99,7 @@ tech_challeng_2/
 │   ├── bronze/bronze_landing.py      # Ingestão batch: CSV local -> S3 Parquet
 │   ├── silver/silver_transform.py    # Limpeza, padronização, join, gravação no S3
 │   ├── gold/gold_analytics.py        # Camada analítica: indicador, comparação meta x resultado, evolução temporal
-│   └── ingestion/streaming/          # Kinesis producer/consumer — planejado, não implantado
+│   └── ingestion/streaming/          # Kinesis producer + consumer (polling) — testado ponta a ponta
 ├── quality/validations/data_quality_checks.py  # Checks de qualidade de dados
 ├── monitoring/alerts/                # Esqueleto de alarmes CloudWatch — planejado
 ├── docs/
@@ -116,12 +118,12 @@ tech_challeng_2/
 | Apache Parquet | Formato de armazenamento em todas as camadas | Colunar, comprime melhor que CSV, leitura seletiva de colunas |
 | Amazon S3 | Data lake (Bronze/Silver/Gold) | Custo baixo por armazenamento, particionamento nativo por prefixo |
 | Google BigQuery (via Base dos Dados) | Fonte dos dados brutos | Extração pontual dos datasets públicos do INEP já estruturados |
-| Amazon Kinesis (planejado) | Simulação de ingestão streaming | Managed, baixa latência — código escrito, ainda não implantado |
+| Amazon Kinesis | Simulação de ingestão streaming | Managed, baixa latência — testado sob demanda (criado, usado, deletado), não fica ativo continuamente |
 
 ## Decisões Arquiteturais (trade-offs)
 
 ### Batch vs Streaming
-Hoje só o batch está implementado e testado ponta a ponta. O streaming é permitido pelo enunciado como **simulação** — os scripts (`kinesis_producer.py`/`kinesis_consumer.py`) já existem, mas adiamos o deploy real do stream Kinesis para não gerar custo de infraestrutura rodando sem necessidade antes de haver um caso de uso real de dados em tempo real neste projeto.
+O batch (Bronze/Silver/Gold) roda com dados persistentes, particionados por `ingestion_date`. O streaming é permitido pelo enunciado como **simulação** — testamos ponta a ponta (`kinesis_producer.py` publica eventos, `kinesis_consumer.py` lê via polling `get_records` e grava em `s3://tc-fase2-alfabetizacao-bronze/streaming/`), mas o stream Kinesis só é criado sob demanda para o teste e é deletado logo em seguida, em vez de ficar ativo continuamente — evita pagar por um shard rodando 24/7 sem um caso de uso real de dados em tempo real neste projeto ainda.
 
 ### Data Lake vs Data Warehouse
 Optamos por **Data Lake (S3 + Parquet)** em vez de um Data Warehouse gerenciado (Redshift/BigQuery). Motivo: schema evolui entre as camadas (Bronze bruto → Silver tratado), e pandas lê Parquet diretamente do S3 sem custo de warehouse ocioso — só paga o que está armazenado.
@@ -147,7 +149,7 @@ Cada check tem uma **severidade**: `critico` interrompe o pipeline (`ValueError`
 - Parquet em todas as camadas (~75% menor que CSV equivalente).
 - Particionamento por `ingestion_date` — permite reprocessar sem sobrescrever e, futuramente, ler só a partição necessária.
 - Nenhum recurso computacional roda continuamente: os scripts processam sob demanda e terminam; o único custo recorrente hoje é armazenamento no S3 (bronze + silver), sem cluster, warehouse ou stream ficando ociosos.
-- Streaming (Kinesis) deliberadamente não implantado ainda — evita pagar por um shard rodando 24/7 sem uso real.
+- Streaming (Kinesis): stream provisionado sob demanda só durante o teste/execução e deletado logo depois — evita pagar por um shard rodando 24/7 sem uso real.
 
 ## Aplicação em IA (Camada Gold)
 
@@ -176,4 +178,11 @@ Este projeto usa `/opt/anaconda3/bin/python3` (ambiente com boto3/pandas/pyarrow
 
 # 5. Rodar a camada Gold (lê do Silver, gera os datasets analíticos, grava no S3)
 /opt/anaconda3/bin/python3 pipeline/gold/gold_analytics.py
+
+# 6. Testar a ingestão streaming (simulação) — requer criar o stream Kinesis antes
+python3 -c "import boto3; boto3.client('kinesis', region_name='us-east-1').create_stream(StreamName='alfabetizacao-indicadores-stream', ShardCount=1)"
+/opt/anaconda3/bin/python3 pipeline/ingestion/streaming/kinesis_producer.py
+/opt/anaconda3/bin/python3 pipeline/ingestion/streaming/kinesis_consumer.py
+# depois do teste, derrube o stream para não gerar custo ocioso:
+python3 -c "import boto3; boto3.client('kinesis', region_name='us-east-1').delete_stream(StreamName='alfabetizacao-indicadores-stream')"
 ```

@@ -59,3 +59,4 @@ data/processed/
 *.parquet
 *.csv.gz
 REUNIAO1.TXT
+NOTAS_EXPLICACAO_CODIGO.md
